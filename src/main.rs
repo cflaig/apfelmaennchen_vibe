@@ -38,6 +38,9 @@ struct Mandelbrot {
     orbit_converges: bool,
     // Formula selection (0 = standard, 1 = alternative)
     formula: u8,
+    // Window dimensions
+    width: u32,
+    height: u32,
     cache: Vec<(u32, f64, Complex64)>
 }
 
@@ -58,6 +61,8 @@ impl Mandelbrot {
             orbit: Vec::new(),
             orbit_converges: false,
             formula: 0, // 0 = standard formula, 1 = alternative formula
+            width: WIDTH,
+            height: HEIGHT,
             cache: vec![(0, 0.0, Complex64::new(0.0, 0.0)); (WIDTH * HEIGHT) as usize]
         }
     }
@@ -80,8 +85,8 @@ impl Mandelbrot {
 
     fn calculate(&self, x: u32, y: u32, iterations: u32, max_iterations: u32, smooth_it: f64, z: Complex64) -> (u32, f64, Complex64) {
         // Convert pixel coordinates to complex plane coordinates
-        let width = WIDTH as f64;
-        let height = HEIGHT as f64;
+        let width = self.width as f64;
+        let height = self.height as f64;
 
         // Scale to make the view square and centered
         let aspect_ratio = width / height;
@@ -100,7 +105,7 @@ impl Mandelbrot {
         // Early bailout check
         let mag_sq = z.norm_sqr();
         if mag_sq > ESCAPE_RADIUS_SQ {
-            return (iterations, smooth_it, z);
+            return (iterations, iterations as f64, z);
         }
 
         // Use current_iterations for the calculation instead of max_iterations
@@ -114,7 +119,7 @@ impl Mandelbrot {
             if mag_sq > ESCAPE_RADIUS_SQ {
                 // Point escaped - calculate smooth iteration count for better coloring
                 let smooth_i = i as f64 + 1.0 - (mag_sq.ln() / ESCAPE_RADIUS_SQ.ln()).ln() / 2.0_f64.ln();
-                return (i, smooth_i, z);
+                return (i, i as f64, z);
             }
         }
 
@@ -124,8 +129,8 @@ impl Mandelbrot {
 
     // Helper method to draw a pixel
     fn draw_pixel(&self, frame: &mut [u8], x: u32, y: u32, color: [u8; 4]) {
-        if x < WIDTH && y < HEIGHT {
-            let pixel_offset = ((y * WIDTH + x) as usize) * 4;
+        if x < self.width && y < self.height {
+            let pixel_offset = ((y * self.width + x) as usize) * 4;
             if pixel_offset + 3 < frame.len() {
                 frame[pixel_offset..pixel_offset + 4].copy_from_slice(&color);
             }
@@ -146,7 +151,7 @@ impl Mandelbrot {
         let mut err = dx + dy;
 
         loop {
-            if x0 >= 0 && y0 >= 0 && x0 < WIDTH as i32 && y0 < HEIGHT as i32 {
+            if x0 >= 0 && y0 >= 0 && x0 < self.width as i32 && y0 < self.height as i32 {
                 self.draw_pixel(frame, x0 as u32, y0 as u32, color);
             }
 
@@ -339,7 +344,7 @@ impl Mandelbrot {
              // Reset iterations to 1 if view has changed
              self.current_iterations = 3;
             //println!("View parameters changed - resetting iterations to 1");
-            self.cache = vec![(0, 0.0, Complex64::new(0.0, 0.0)); (crate::WIDTH * crate::HEIGHT) as usize]
+            self.cache = vec![(0, 0.0, Complex64::new(0.0, 0.0)); (self.width * self.height) as usize]
          } else {
             //println!("View parameters unchanged - using current iterations: {}", self.current_iterations);
             // Progressively increase iterations
@@ -372,12 +377,13 @@ impl Mandelbrot {
         let color_offset = self.color_offset;
         let current_iterations = self.current_iterations;
         let mut cache = std::mem::take(&mut self.cache);
+        let width = self.width;
 
         let pixel_data: Vec<_> = cache.par_iter_mut()
             .enumerate()
             .map(|(i,(iterations, smooth_iter, z))| {
-                let x = (i % WIDTH as usize) as u32;
-                let y = (i / WIDTH as usize) as u32;
+                let x = (i % width as usize) as u32;
+                let y = (i / width as usize) as u32;
                 // Perform the calculation
                 let (new_iterations, new_smooth_iter, new_z) =
                     self.calculate(x, y, *iterations, current_iterations, *smooth_iter, *z);
@@ -446,7 +452,7 @@ impl Mandelbrot {
                     for dy in -1..=1 {
                         let px = (x as i32 + dx) as u32;
                         let py = (y as i32 + dy) as u32;
-                        if px < WIDTH && py < HEIGHT {
+                        if px < self.width && py < self.height {
                             self.draw_pixel(frame, px, py, orbit_color);
                         }
                     }
@@ -486,8 +492,8 @@ impl Mandelbrot {
     }
 
     fn screen_to_complex(&self, screen_x: f64, screen_y: f64) -> (f64, f64) {
-        let width = WIDTH as f64;
-        let height = HEIGHT as f64;
+        let width = self.width as f64;
+        let height = self.height as f64;
         let aspect_ratio = width / height;
         let scale_x = self.zoom * aspect_ratio;
         let scale_y = self.zoom;
@@ -499,8 +505,8 @@ impl Mandelbrot {
     }
 
     fn complex_to_screen(&self, real: f64, imag: f64) -> (u32, u32) {
-        let width = WIDTH as f64;
-        let height = HEIGHT as f64;
+        let width = self.width as f64;
+        let height = self.height as f64;
         let aspect_ratio = width / height;
         let scale_x = self.zoom * aspect_ratio;
         let scale_y = self.zoom;
@@ -588,10 +594,10 @@ impl Mandelbrot {
 
     fn pan(&mut self, dx: f64, dy: f64) {
         // Scale the movement based on zoom level
-        let aspect_ratio = WIDTH as f64 / HEIGHT as f64;
+        let aspect_ratio = self.width as f64 / self.height as f64;
 
         // Base pan factor - reduced to make panning less sensitive overall
-        let base_pan_factor = 1.0/HEIGHT as f64;
+        let base_pan_factor = 1.0/self.height as f64;
 
         // Calculate adjusted pan factor - reduce sensitivity when zoomed out
         // The initial zoom is 4.0, so we use that as a reference point
@@ -613,6 +619,25 @@ impl Mandelbrot {
         self.center_x += dx * self.zoom * aspect_ratio * adjusted_pan_factor;
         self.center_y += dy * self.zoom * adjusted_pan_factor;
     }
+
+    fn resize(&mut self, new_width: u32, new_height: u32) {
+        // Only resize if dimensions have actually changed
+        if self.width == new_width && self.height == new_height {
+            return;
+        }
+
+        // Update dimensions
+        self.width = new_width;
+        self.height = new_height;
+
+        // Resize the cache
+        self.cache = vec![(0, 0.0, Complex64::new(0.0, 0.0)); (new_width * new_height) as usize];
+
+        // Force a recalculation of the view by setting previous parameters to different values
+        self.prev_center_x = self.center_x + 1.0;
+        self.prev_center_y = self.center_y + 1.0;
+        self.prev_zoom = self.zoom * 2.0;
+    }
 }
 
 fn main() -> Result<(), Error> {
@@ -626,7 +651,6 @@ fn main() -> Result<(), Error> {
         WindowBuilder::new()
             .with_title("Apfelmännchen (Mandelbrot Set)")
             .with_inner_size(size)
-            .with_min_inner_size(size)
             .build(&event_loop)
             .unwrap()
     };
@@ -634,10 +658,12 @@ fn main() -> Result<(), Error> {
     let mut pixels = {
         let window_size = window.inner_size();
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-        Pixels::new(WIDTH, HEIGHT, surface_texture)?
+        Pixels::new(window_size.width, window_size.height, surface_texture)?
     };
 
+    let window_size = window.inner_size();
     let mut mandelbrot = Mandelbrot::new();
+    mandelbrot.resize(window_size.width, window_size.height);
     let mut color_cycling_enabled = true;
 
     // Variables for tracking mouse panning
@@ -676,11 +702,20 @@ fn main() -> Result<(), Error> {
 
             // Resize the window
             if let Some(size) = input.window_resized() {
+                // Resize the pixel buffer to match the new window size
+                if let Err(err) = pixels.resize_buffer(size.width, size.height) {
+                    error!("pixels.resize_buffer error: {err}");
+                    *control_flow = ControlFlow::Exit;
+                    return;
+                }
+                // Resize the surface texture to match the new window size
                 if let Err(err) = pixels.resize_surface(size.width, size.height) {
                     error!("pixels.resize_surface error: {err}");
                     *control_flow = ControlFlow::Exit;
                     return;
                 }
+                // Update the Mandelbrot struct with the new window dimensions
+                mandelbrot.resize(size.width, size.height);
             }
 
             // Handle zooming
@@ -781,6 +816,6 @@ fn main() -> Result<(), Error> {
 
         // Set the control flow to wait for the next event
         // Update iterations based on view changes
-        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(500));
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
     });
 }
