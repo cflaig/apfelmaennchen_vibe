@@ -10,9 +10,11 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{WindowBuilder};
 use winit_input_helper::WinitInputHelper;
 
+mod gpu_mandelbrot;
+
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
-const MAX_ITERATIONS: u32 = 20;
+const MAX_ITERATIONS: u32 = 51200;
 const ESCAPE_RADIUS_SQ: f64 = 256.0; // 16.0^2
 
 struct Mandelbrot {
@@ -41,18 +43,27 @@ struct Mandelbrot {
     // Window dimensions
     width: u32,
     height: u32,
-    cache: Vec<(u32, f64, Complex64)>
+    cache: Vec<(u32, f64, Complex64)>,
+    // GPU implementation
+    gpu_mandelbrot: Option<gpu_mandelbrot::GpuMandelbrot>,
+    // Flag to use GPU implementation
+    use_gpu: bool
 }
 
 impl Mandelbrot {
     fn new() -> Self {
+        // Initialize GPU implementation
+        let gpu_mandelbrot = pollster::block_on(async {
+            gpu_mandelbrot::GpuMandelbrot::new(WIDTH, HEIGHT).await
+        });
+
         Self {
             center_x: -0.5,
             center_y: 0.0,
             zoom: 4.0,
             color_offset: 0.0,
             current_iterations: 2, // Start with 1 iteration
-            max_iterations: 20,
+            max_iterations: 51200,
             prev_center_x: -0.5,
             prev_center_y: 0.0,
             prev_zoom: 4.0,
@@ -63,7 +74,9 @@ impl Mandelbrot {
             formula: 0, // 0 = standard formula, 1 = alternative formula
             width: WIDTH,
             height: HEIGHT,
-            cache: vec![(0, 0.0, Complex64::new(0.0, 0.0)); (WIDTH * HEIGHT) as usize]
+            cache: vec![(0, 0.0, Complex64::new(0.0, 0.0)); (WIDTH * HEIGHT) as usize],
+            gpu_mandelbrot: Some(gpu_mandelbrot),
+            use_gpu: true // Use GPU by default
         }
     }
 
@@ -305,7 +318,7 @@ impl Mandelbrot {
 
         // Draw background rectangle for the status area
         let status_width = 300;
-        let status_height = 115; // Increased height to accommodate the additional line
+        let status_height = 130; // Increased height to accommodate the additional line
         for y in 0..status_height {
             for x in 0..status_width {
                 self.draw_pixel(frame, x, y, bg_color);
@@ -329,6 +342,9 @@ impl Mandelbrot {
         self.draw_text(frame, 10, 100, &format!("Orbit: {} points ({})", 
             self.orbit.len(),
             if self.orbit_converges { "converging - green" } else { "diverging - yellow" }
+        ), text_color);
+        self.draw_text(frame, 10, 115, &format!("Rendering: {} (Toggle with 'G')", 
+            if self.use_gpu { "GPU (Compute Shader)" } else { "CPU (Parallel)" }
         ), text_color);
     }
 
@@ -370,54 +386,83 @@ impl Mandelbrot {
     }
 
     fn render(&mut self, frame: &mut [u8], color_cycling_enabled: bool) {
-
         let start_time = Instant::now();
 
-        // Create a vector to store pixel data in parallel
-        let color_offset = self.color_offset;
-        let current_iterations = self.current_iterations;
-        let mut cache = std::mem::take(&mut self.cache);
-        let width = self.width;
+        if self.use_gpu {
+            // GPU-based rendering
+            if let Some(gpu) = &self.gpu_mandelbrot {
+                // Update parameters
+                let params = gpu_mandelbrot::MandelbrotParams {
+                    center_x: self.center_x as f32,
+                    center_y: self.center_y as f32,
+                    zoom: self.zoom as f32,
+                    max_iterations: self.current_iterations,
+                    width: self.width,
+                    height: self.height,
+                    color_offset: self.color_offset as f32,
+                    formula: self.formula as u32,
+                };
 
-        let pixel_data: Vec<_> = cache.par_iter_mut()
-            .enumerate()
-            .map(|(i,(iterations, smooth_iter, z))| {
-                let x = (i % width as usize) as u32;
-                let y = (i / width as usize) as u32;
-                // Perform the calculation
-                let (new_iterations, new_smooth_iter, new_z) =
-                    self.calculate(x, y, *iterations, current_iterations, *smooth_iter, *z);
+                // Update GPU parameters
+                gpu.update_params(params);
 
-                // Update the cache values
-                *iterations = new_iterations;
-                *smooth_iter = new_smooth_iter;
-                *z = new_z;
+                // Run compute shader
+                gpu.compute();
 
-                if new_iterations == current_iterations {
-                    // Points inside the Mandelbrot set
-                    [0, 0, 0, 255]
-                } else {
-                    // Points outside the set - use smooth coloring
-                    let t = new_smooth_iter / current_iterations as f64;
+                // Copy results back to frame buffer
+                gpu.copy_to_buffer(frame);
 
-                    // This creates a rainbow-like effect with smooth transitions
-                    let hue = (0.95 * t * 360.0 + color_offset) % 360.0;
-                    let (r, g, b) = Self::hsv_to_rgb(hue, 0.8, 1.0);
+                let elapsed_time = start_time.elapsed();
+                println!("GPU render call took: {:?}", elapsed_time);
+            }
+        } else {
+            // CPU-based rendering (original implementation)
+            // Create a vector to store pixel data in parallel
+            let color_offset = self.color_offset;
+            let current_iterations = self.current_iterations;
+            let mut cache = std::mem::take(&mut self.cache);
+            let width = self.width;
 
-                    [r, g, b, 255]
+            let pixel_data: Vec<_> = cache.par_iter_mut()
+                .enumerate()
+                .map(|(i,(iterations, smooth_iter, z))| {
+                    let x = (i % width as usize) as u32;
+                    let y = (i / width as usize) as u32;
+                    // Perform the calculation
+                    let (new_iterations, new_smooth_iter, new_z) =
+                        self.calculate(x, y, *iterations, current_iterations, *smooth_iter, *z);
+
+                    // Update the cache values
+                    *iterations = new_iterations;
+                    *smooth_iter = new_smooth_iter;
+                    *z = new_z;
+
+                    if new_iterations == current_iterations {
+                        // Points inside the Mandelbrot set
+                        [0, 0, 0, 255]
+                    } else {
+                        // Points outside the set - use smooth coloring
+                        let t = new_smooth_iter / current_iterations as f64;
+
+                        // This creates a rainbow-like effect with smooth transitions
+                        let hue = (0.95 * t * 360.0 + color_offset) % 360.0;
+                        let (r, g, b) = Self::hsv_to_rgb(hue, 0.8, 1.0);
+
+                        [r, g, b, 255]
+                    }
+                }).collect();
+
+            self.cache = cache;
+
+            let elapsed_time = start_time.elapsed();
+            println!("CPU render call took: {:?}", elapsed_time);
+
+            // Copy the calculated pixel data to the frame buffer
+            for (i, pixel_color) in pixel_data.iter().enumerate() {
+                let pixel_offset = i * 4;
+                if pixel_offset + 3 < frame.len() {
+                    frame[pixel_offset..pixel_offset + 4].copy_from_slice(pixel_color);
                 }
-            }).collect();
-
-        self.cache = cache;
-
-        let elapsed_time = start_time.elapsed();
-        println!("Render call took: {:?}", elapsed_time);
-
-        // Copy the calculated pixel data to the frame buffer
-        for (i, pixel_color) in pixel_data.iter().enumerate() {
-            let pixel_offset = i * 4;
-            if pixel_offset + 3 < frame.len() {
-                frame[pixel_offset..pixel_offset + 4].copy_from_slice(pixel_color);
             }
         }
 
@@ -630,13 +675,24 @@ impl Mandelbrot {
         self.width = new_width;
         self.height = new_height;
 
-        // Resize the cache
+        // Resize the cache for CPU rendering
         self.cache = vec![(0, 0.0, Complex64::new(0.0, 0.0)); (new_width * new_height) as usize];
+
+        // Resize GPU buffers if using GPU
+        if let Some(gpu) = &mut self.gpu_mandelbrot {
+            gpu.resize(new_width, new_height);
+        }
 
         // Force a recalculation of the view by setting previous parameters to different values
         self.prev_center_x = self.center_x + 1.0;
         self.prev_center_y = self.center_y + 1.0;
         self.prev_zoom = self.zoom * 2.0;
+    }
+
+    // Toggle between CPU and GPU rendering
+    fn toggle_gpu(&mut self) {
+        self.use_gpu = !self.use_gpu;
+        println!("Using {} rendering", if self.use_gpu { "GPU" } else { "CPU" });
     }
 }
 
@@ -687,6 +743,11 @@ fn main() -> Result<(), Error> {
             // Toggle formula with 'F' key
             if input.key_pressed(VirtualKeyCode::F) {
                 mandelbrot.formula = 1 - mandelbrot.formula; // Toggle between 0 and 1
+            }
+
+            // Toggle between CPU and GPU rendering with 'G' key
+            if input.key_pressed(VirtualKeyCode::G) {
+                mandelbrot.toggle_gpu();
             }
 
             // Double max_iterations with 'i' key

@@ -12,6 +12,10 @@ env_logger = "0.10"
 rand = "0.8"
 rayon = "1.8"
 num-complex = "0.4.6"
+wgpu = "0.16.3"
+bytemuck = { version = "1.14", features = ["derive"] }
+pollster = "0.3"
+futures-intrusive = "0.5"
 
 
 [profile.release]
